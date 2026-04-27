@@ -3,7 +3,7 @@ import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { setApiKey, hasApiKey } from "@/api/client";
-import { fetchAuthStatus, loginWithPassword } from "@/api/auth";
+import { fetchAuthStatus, loginWithPassword, fetchTotpStatus, loginWithTotp } from "@/api/auth";
 
 const { t } = useI18n();
 const router = useRouter();
@@ -14,12 +14,14 @@ const urlToken = (window as any).__LOGIN_TOKEN__ || "";
 const token = ref(urlToken);
 const username = ref("");
 const password = ref("");
+const totpCode = ref("");
 const loading = ref(false);
 const errorMsg = ref("");
 
-// Login method: 'token' or 'password'
-const loginMethod = ref<"token" | "password">("token");
+// Login method: 'token', 'password', or 'totp'
+const loginMethod = ref<"token" | "password" | "totp">("token");
 const hasPasswordLogin = ref(false);
+const hasTotpLogin = ref(false);
 
 // If already has a key, try to go to main page
 if (hasApiKey()) {
@@ -36,13 +38,24 @@ onMounted(async () => {
   } catch {
     // Fallback to token-only
   }
+  try {
+    const totpStatus = await fetchTotpStatus();
+    hasTotpLogin.value = totpStatus.totpEnabled;
+    if (totpStatus.totpEnabled && !urlToken && !hasPasswordLogin.value) {
+      loginMethod.value = "totp";
+    }
+  } catch {
+    // TOTP not available
+  }
 });
 
 async function handleLogin() {
   if (loginMethod.value === "token") {
     await handleTokenLogin();
-  } else {
+  } else if (loginMethod.value === "password") {
     await handlePasswordLogin();
+  } else {
+    await handleTotpLogin();
   }
 }
 
@@ -95,6 +108,26 @@ async function handlePasswordLogin() {
     loading.value = false;
   }
 }
+
+async function handleTotpLogin() {
+  if (!totpCode.value.trim()) {
+    errorMsg.value = t("login.totpRequired");
+    return;
+  }
+
+  loading.value = true;
+  errorMsg.value = "";
+
+  try {
+    const sessionToken = await loginWithTotp(totpCode.value.trim());
+    setApiKey(sessionToken);
+    router.replace("/hermes/chat");
+  } catch (err: any) {
+    errorMsg.value = err.message || t("login.invalidTotp");
+  } finally {
+    loading.value = false;
+  }
+}
 </script>
 
 <template>
@@ -107,12 +140,19 @@ async function handlePasswordLogin() {
       <p class="login-desc">{{ t("login.description") }}</p>
 
       <!-- Method toggle -->
-      <div v-if="hasPasswordLogin" class="login-method-toggle">
+      <div v-if="hasPasswordLogin || hasTotpLogin" class="login-method-toggle">
         <button
+          v-if="hasPasswordLogin"
           class="toggle-btn"
           :class="{ active: loginMethod === 'password' }"
           @click="loginMethod = 'password'"
         >{{ t("login.passwordLogin") }}</button>
+        <button
+          v-if="hasTotpLogin"
+          class="toggle-btn"
+          :class="{ active: loginMethod === 'totp' }"
+          @click="loginMethod = 'totp'"
+        >{{ t("login.totpLogin") }}</button>
         <button
           class="toggle-btn"
           :class="{ active: loginMethod === 'token' }"
@@ -147,6 +187,20 @@ async function handlePasswordLogin() {
             class="login-input"
             :placeholder="t('login.passwordPlaceholder')"
             @keyup.enter="handleLogin"
+          />
+        </template>
+
+        <!-- TOTP login -->
+        <template v-if="loginMethod === 'totp'">
+          <input
+            v-model="totpCode"
+            type="text"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            class="login-input login-totp-input"
+            :placeholder="t('login.totpPlaceholder')"
+            autofocus
           />
         </template>
 
@@ -256,6 +310,12 @@ async function handlePasswordLogin() {
   &:focus {
     border-color: $accent-primary;
   }
+}
+
+.login-totp-input {
+  text-align: center;
+  font-size: 28px;
+  letter-spacing: 12px;
 }
 
 .login-error {

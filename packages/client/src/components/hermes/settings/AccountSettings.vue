@@ -2,7 +2,7 @@
 import { ref, onMounted } from "vue";
 import { NButton, NInput, NModal, NForm, NFormItem, NPopconfirm, useMessage } from "naive-ui";
 import { useI18n } from "vue-i18n";
-import { fetchAuthStatus, setupPassword, changePassword, changeUsername, removePassword } from "@/api/auth";
+import { fetchAuthStatus, setupPassword, changePassword, changeUsername, removePassword, fetchTotpStatus, setupTotp, activateTotp, disableTotp } from "@/api/auth";
 
 const { t } = useI18n();
 const message = useMessage();
@@ -28,11 +28,23 @@ const showChangeUsernameModal = ref(false);
 const currentPasswordForName = ref("");
 const newUsernameVal = ref("");
 
+// TOTP
+const hasTotpLogin = ref(false);
+const showTotpSetupModal = ref(false);
+const totpQrDataUri = ref("");
+const totpSecretManual = ref("");
+const totpActivationCode = ref("");
+const totpLoading = ref(false);
+
 onMounted(async () => {
   try {
     const status = await fetchAuthStatus();
     hasPasswordLogin.value = status.hasPasswordLogin;
     username.value = status.username;
+  } catch { /* ignore */ }
+  try {
+    const totpStatus = await fetchTotpStatus();
+    hasTotpLogin.value = totpStatus.totpEnabled;
   } catch { /* ignore */ }
 });
 
@@ -139,6 +151,63 @@ function openChangeUsernameModal() {
   newUsernameVal.value = "";
   showChangeUsernameModal.value = true;
 }
+
+// TOTP
+async function handleTotpSetup() {
+  totpLoading.value = true;
+  try {
+    const result = await setupTotp();
+    totpQrDataUri.value = result.qrDataUri;
+    totpSecretManual.value = result.secret;
+    totpActivationCode.value = "";
+    showTotpSetupModal.value = true;
+  } catch (err: any) {
+    message.error(err.message || t("common.saveFailed"));
+  } finally {
+    totpLoading.value = false;
+  }
+}
+
+async function handleTotpActivate() {
+  if (!totpActivationCode.value.trim() || totpActivationCode.value.length !== 6) {
+    message.error(t("login.totpActivationCodeRequired"));
+    return;
+  }
+  totpLoading.value = true;
+  try {
+    await activateTotp(totpSecretManual.value, totpActivationCode.value.trim());
+    hasTotpLogin.value = true;
+    showTotpSetupModal.value = false;
+    totpQrDataUri.value = "";
+    totpSecretManual.value = "";
+    totpActivationCode.value = "";
+    message.success(t("login.totpSetupSuccess"));
+  } catch (err: any) {
+    message.error(err.message || t("login.totpActivationFailed"));
+  } finally {
+    totpLoading.value = false;
+  }
+}
+
+async function handleDisableTotp() {
+  totpLoading.value = true;
+  try {
+    await disableTotp();
+    hasTotpLogin.value = false;
+    message.success(t("login.totpRemoved"));
+  } catch (err: any) {
+    message.error(err.message || t("common.saveFailed"));
+  } finally {
+    totpLoading.value = false;
+  }
+}
+
+function openTotpSetupModal() {
+  totpQrDataUri.value = "";
+  totpSecretManual.value = "";
+  totpActivationCode.value = "";
+  handleTotpSetup();
+}
 </script>
 
 <template>
@@ -221,6 +290,53 @@ function openChangeUsernameModal() {
         <NButton type="primary" :loading="loading" @click="handleChangeUsername">{{ t("common.save") }}</NButton>
       </template>
     </NModal>
+
+    <!-- TOTP section -->
+    <div class="section-divider"></div>
+    <h3 class="section-title">{{ t("login.totpTitle") }}</h3>
+    <p class="section-desc">{{ t("login.totpDescription") }}</p>
+
+    <div v-if="!hasTotpLogin" class="action-row">
+      <span class="action-label">{{ t("login.totpNotConfigured") }}</span>
+      <NButton type="primary" :loading="totpLoading" @click="openTotpSetupModal">{{ t("login.totpSetup") }}</NButton>
+    </div>
+
+    <div v-else class="configured-section">
+      <div class="action-row">
+        <span class="action-label">{{ t("login.totpConfigured") }}</span>
+        <div class="action-buttons">
+          <NPopconfirm @positive-click="handleDisableTotp">
+            <template #trigger>
+              <NButton type="error" ghost :loading="totpLoading">{{ t("login.totpDisable") }}</NButton>
+            </template>
+            {{ t("login.totpRemoveConfirm") }}
+          </NPopconfirm>
+        </div>
+      </div>
+    </div>
+
+    <!-- TOTP Setup modal -->
+    <NModal v-model:show="showTotpSetupModal" preset="dialog" :title="t('login.totpSetup')">
+      <div class="totp-setup">
+        <p>{{ t("login.totpScanInstructions") }}</p>
+        <img v-if="totpQrDataUri" :src="totpQrDataUri" alt="TOTP QR Code" class="totp-qr-code" />
+        <p class="totp-manual-label">{{ t("login.totpManualEntry") }}</p>
+        <NInput v-model:value="totpSecretManual" readonly class="totp-secret-input" />
+        <div class="totp-activation">
+          <NInput
+            v-model:value="totpActivationCode"
+            :placeholder="t('login.totpActivationCodePlaceholder')"
+            inputmode="numeric"
+            maxlength="6"
+            @keyup.enter="handleTotpActivate"
+          />
+          <NButton type="primary" :loading="totpLoading" @click="handleTotpActivate">{{ t("common.confirm") }}</NButton>
+        </div>
+      </div>
+      <template #action>
+        <NButton @click="showTotpSetupModal = false">{{ t("common.cancel") }}</NButton>
+      </template>
+    </NModal>
   </div>
 </template>
 
@@ -254,5 +370,46 @@ function openChangeUsernameModal() {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.section-divider {
+  border-top: 1px solid $border-color;
+  margin: 24px 0 16px;
+}
+
+.section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: $text-primary;
+  margin: 0 0 8px;
+}
+
+.totp-setup {
+  text-align: center;
+  padding: 8px 0;
+}
+
+.totp-qr-code {
+  width: 200px;
+  height: 200px;
+  margin: 16px auto;
+  display: block;
+}
+
+.totp-manual-label {
+  font-size: 13px;
+  color: $text-muted;
+  margin: 12px 0 8px;
+}
+
+.totp-secret-input {
+  font-family: $font-code;
+  text-align: center;
+}
+
+.totp-activation {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
 }
 </style>
